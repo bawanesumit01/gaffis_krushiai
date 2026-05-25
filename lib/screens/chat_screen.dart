@@ -5,6 +5,9 @@ import 'package:speech_to_text/speech_to_text.dart' as stt;
 import 'dart:io';
 import 'package:image_picker/image_picker.dart';
 import 'call_screen.dart';
+import 'package:shared_preferences/shared_preferences.dart';
+import 'package:device_info_plus/device_info_plus.dart';
+import 'package:uuid/uuid.dart';
 
 class ChatScreen extends StatefulWidget {
   final String languageCode;
@@ -27,6 +30,7 @@ class _ChatScreenState extends State<ChatScreen> {
   bool isListening = false;
   File? selectedImage;
   final ImagePicker _picker = ImagePicker();
+  String userKey = "";
 
   final controller = TextEditingController();
   // ✅ REMOVED flutterTts — no longer needed
@@ -51,6 +55,69 @@ class _ChatScreenState extends State<ChatScreen> {
   void initState() {
     super.initState();
     speech = stt.SpeechToText();
+
+    initUserKey();
+  }
+
+  @override
+  void dispose() {
+    controller.dispose();
+    scrollController.dispose();
+    speech.stop();
+
+    super.dispose();
+  }
+
+  Future<void> initUserKey() async {
+    SharedPreferences prefs = await SharedPreferences.getInstance();
+
+    String? mobileNo = prefs.getString("mobile_no");
+
+    if (mobileNo != null && mobileNo.isNotEmpty) {
+      userKey = mobileNo;
+    } else {
+      String? deviceId = prefs.getString("device_id");
+
+      if (deviceId == null) {
+        deviceId = const Uuid().v4();
+
+        await prefs.setString("device_id", deviceId);
+      }
+
+      userKey = deviceId;
+    }
+
+    await loadChatHistory();
+  }
+
+  Future<void> saveChatHistory() async {
+    SharedPreferences prefs = await SharedPreferences.getInstance();
+
+    String key = "chat_$userKey";
+
+    List<String> jsonList = messages.map((e) => jsonEncode(e)).toList();
+
+    await prefs.setStringList(key, jsonList);
+  }
+
+  Future<void> loadChatHistory() async {
+    SharedPreferences prefs = await SharedPreferences.getInstance();
+
+    String key = "chat_$userKey";
+
+    List<String>? saved = prefs.getStringList(key);
+
+    if (saved != null) {
+      setState(() {
+        messages.clear();
+
+        messages.addAll(
+          saved.map((e) => Map<String, String>.from(jsonDecode(e))),
+        );
+      });
+
+      scrollToBottom();
+    }
   }
 
   Future<void> toggleListening() async {
@@ -91,53 +158,133 @@ class _ChatScreenState extends State<ChatScreen> {
     }
   }
 
+  // Future<void> sendMessage() async {
+  //   final text = controller.text.trim();
+  //   if (text.isEmpty && selectedImage == null) return;
+
+  //   controller.clear();
+
+  //   setState(() {
+  //     if (text.isNotEmpty) messages.add({'from': 'user', 'text': text});
+  //     if (selectedImage != null) {
+  //       messages.add({'from': 'user', 'image': selectedImage!.path});
+  //     }
+  //     isTyping = true;
+  //   });
+
+  //   scrollToBottom();
+
+  //   final uri = Uri.parse('https://gaffis.net/pulse/public/api/chat');
+  //   final request = http.MultipartRequest('POST', uri);
+  //   request.fields['message'] = text;
+  //   request.fields['language'] = widget.languageCode;
+
+  //   if (selectedImage != null) {
+  //     request.files.add(
+  //       await http.MultipartFile.fromPath('image', selectedImage!.path),
+  //     );
+  //   }
+
+  //   final streamedResponse = await request.send();
+  //   final response = await http.Response.fromStream(streamedResponse);
+
+  //   if (response.statusCode != 200) {
+  //     setState(() => isTyping = false);
+  //     return;
+  //   }
+
+  //   final decoded = jsonDecode(response.body);
+  //   final reply = decoded['reply'] ?? 'No response';
+
+  //   setState(() {
+  //     isTyping = false;
+  //     selectedImage = null;
+  //     messages.add({'from': 'ai', 'text': reply});
+  //   });
+  //   await saveChatHistory();
+
+  //   scrollToBottom();
+  //   // ✅ No TTS here — chat screen is text only
+  //   // Voice calls handled by CallScreen via Vapi
+  // }
+
   Future<void> sendMessage() async {
     final text = controller.text.trim();
+
     if (text.isEmpty && selectedImage == null) return;
 
     controller.clear();
 
     setState(() {
-      if (text.isNotEmpty) messages.add({'from': 'user', 'text': text});
+      if (text.isNotEmpty) {
+        messages.add({'from': 'user', 'text': text});
+      }
+
       if (selectedImage != null) {
         messages.add({'from': 'user', 'image': selectedImage!.path});
       }
+
       isTyping = true;
     });
 
     scrollToBottom();
 
-    final uri = Uri.parse('https://gaffis.net/pulse/public/api/chat');
-    final request = http.MultipartRequest('POST', uri);
-    request.fields['message'] = text;
-    request.fields['language'] = widget.languageCode;
+    // save user message immediately
+    await saveChatHistory();
 
-    if (selectedImage != null) {
-      request.files.add(
-        await http.MultipartFile.fromPath('image', selectedImage!.path),
-      );
+    try {
+      final uri = Uri.parse('https://gaffis.net/pulse/public/api/chat');
+
+      final request = http.MultipartRequest('POST', uri);
+
+      request.fields['message'] = text;
+
+      request.fields['language'] = widget.languageCode;
+
+      // send previous history also
+      final recentHistory = messages.length > 20
+          ? messages.sublist(messages.length - 20)
+          : messages;
+
+      request.fields['history'] = jsonEncode(recentHistory);
+
+      if (selectedImage != null) {
+        request.files.add(
+          await http.MultipartFile.fromPath('image', selectedImage!.path),
+        );
+      }
+
+      final streamed = await request.send();
+
+      final response = await http.Response.fromStream(streamed);
+
+      if (response.statusCode != 200) {
+        throw Exception();
+      }
+
+      final decoded = jsonDecode(response.body);
+
+      final reply = decoded['reply'] ?? "No response";
+
+      setState(() {
+        isTyping = false;
+        selectedImage = null;
+
+        messages.add({'from': 'ai', 'text': reply});
+      });
+
+      await saveChatHistory();
+
+      scrollToBottom();
+    } catch (e) {
+      setState(() {
+        isTyping = false;
+
+        messages.add({'from': 'ai', 'text': 'Something went wrong'});
+      });
+
+      await saveChatHistory();
     }
-
-    final streamedResponse = await request.send();
-    final response = await http.Response.fromStream(streamedResponse);
-
-    if (response.statusCode != 200) {
-      setState(() => isTyping = false);
-      return;
-    }
-
-    final decoded = jsonDecode(response.body);
-    final reply = decoded['reply'] ?? 'No response';
-
-    setState(() {
-      isTyping = false;
-      selectedImage = null;
-      messages.add({'from': 'ai', 'text': reply});
-    });
-
-    scrollToBottom();
-    // ✅ No TTS here — chat screen is text only
-    // Voice calls handled by CallScreen via Vapi
   }
 
   Widget chatBubble(Map<String, String> m) {
@@ -146,8 +293,9 @@ class _ChatScreenState extends State<ChatScreen> {
     return Align(
       alignment: isUser ? Alignment.centerRight : Alignment.centerLeft,
       child: Container(
-        constraints:
-            BoxConstraints(maxWidth: MediaQuery.of(context).size.width * 0.75),
+        constraints: BoxConstraints(
+          maxWidth: MediaQuery.of(context).size.width * 0.75,
+        ),
         padding: const EdgeInsets.all(10),
         margin: const EdgeInsets.symmetric(vertical: 6),
         decoration: BoxDecoration(
@@ -165,16 +313,23 @@ class _ChatScreenState extends State<ChatScreen> {
             if (m.containsKey('image'))
               ClipRRect(
                 borderRadius: BorderRadius.circular(12),
-                child: Image.file(File(m['image']!),
-                    width: 220, height: 180, fit: BoxFit.cover),
+                child: Image.file(
+                  File(m['image']!),
+                  width: 220,
+                  height: 180,
+                  fit: BoxFit.cover,
+                ),
               ),
             if (m.containsKey('text'))
               Padding(
                 padding: EdgeInsets.only(top: m.containsKey('image') ? 8 : 0),
-                child: Text(m['text']!,
-                    style: TextStyle(
-                        color: isUser ? Colors.white : Colors.black87,
-                        fontSize: 15)),
+                child: Text(
+                  m['text']!,
+                  style: TextStyle(
+                    color: isUser ? Colors.white : Colors.black87,
+                    fontSize: 15,
+                  ),
+                ),
               ),
           ],
         ),
@@ -221,14 +376,18 @@ class _ChatScreenState extends State<ChatScreen> {
             Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                const Text('Gaffis Krushi AI',
-                    style: TextStyle(
-                        fontSize: 18,
-                        fontWeight: FontWeight.bold,
-                        color: Colors.white)),
-                Text(widget.languageName,
-                    style:
-                        const TextStyle(fontSize: 12, color: Colors.white70)),
+                const Text(
+                  'Gaffis Krushi AI',
+                  style: TextStyle(
+                    fontSize: 18,
+                    fontWeight: FontWeight.bold,
+                    color: Colors.white,
+                  ),
+                ),
+                Text(
+                  widget.languageName,
+                  style: const TextStyle(fontSize: 12, color: Colors.white70),
+                ),
               ],
             ),
           ],
@@ -247,8 +406,10 @@ class _ChatScreenState extends State<ChatScreen> {
                     padding: EdgeInsets.all(8),
                     child: Align(
                       alignment: Alignment.centerLeft,
-                      child: Text('Krushi AI is typing...',
-                          style: TextStyle(color: Colors.grey)),
+                      child: Text(
+                        'Krushi AI is typing...',
+                        style: TextStyle(color: Colors.grey),
+                      ),
                     ),
                   );
                 }
@@ -267,18 +428,27 @@ class _ChatScreenState extends State<ChatScreen> {
                   children: [
                     ClipRRect(
                       borderRadius: BorderRadius.circular(12),
-                      child: Image.file(selectedImage!,
-                          height: 100, width: 120, fit: BoxFit.cover),
+                      child: Image.file(
+                        selectedImage!,
+                        height: 100,
+                        width: 120,
+                        fit: BoxFit.cover,
+                      ),
                     ),
                     Positioned(
                       right: 4,
                       top: 4,
                       child: Container(
                         decoration: const BoxDecoration(
-                            color: Colors.black54, shape: BoxShape.circle),
+                          color: Colors.black54,
+                          shape: BoxShape.circle,
+                        ),
                         child: IconButton(
-                          icon: const Icon(Icons.close,
-                              color: Colors.white, size: 18),
+                          icon: const Icon(
+                            Icons.close,
+                            color: Colors.white,
+                            size: 18,
+                          ),
                           onPressed: () => setState(() => selectedImage = null),
                         ),
                       ),
@@ -302,24 +472,26 @@ class _ChatScreenState extends State<ChatScreen> {
                       showModalBottomSheet(
                         context: context,
                         builder: (_) => SafeArea(
-                          child: Wrap(children: [
-                            ListTile(
-                              leading: const Icon(Icons.camera),
-                              title: const Text('Camera'),
-                              onTap: () {
-                                Navigator.pop(context);
-                                pickImage(ImageSource.camera);
-                              },
-                            ),
-                            ListTile(
-                              leading: const Icon(Icons.photo),
-                              title: const Text('Gallery'),
-                              onTap: () {
-                                Navigator.pop(context);
-                                pickImage(ImageSource.gallery);
-                              },
-                            ),
-                          ]),
+                          child: Wrap(
+                            children: [
+                              ListTile(
+                                leading: const Icon(Icons.camera),
+                                title: const Text('Camera'),
+                                onTap: () {
+                                  Navigator.pop(context);
+                                  pickImage(ImageSource.camera);
+                                },
+                              ),
+                              ListTile(
+                                leading: const Icon(Icons.photo),
+                                title: const Text('Gallery'),
+                                onTap: () {
+                                  Navigator.pop(context);
+                                  pickImage(ImageSource.gallery);
+                                },
+                              ),
+                            ],
+                          ),
                         ),
                       );
                     },
@@ -327,11 +499,14 @@ class _ChatScreenState extends State<ChatScreen> {
                 ),
                 const SizedBox(width: 6),
                 CircleAvatar(
-                  backgroundColor:
-                      isListening ? Colors.red : Colors.green.shade700,
+                  backgroundColor: isListening
+                      ? Colors.red
+                      : Colors.green.shade700,
                   child: IconButton(
-                    icon: Icon(isListening ? Icons.mic : Icons.mic_none,
-                        color: Colors.white),
+                    icon: Icon(
+                      isListening ? Icons.mic : Icons.mic_none,
+                      color: Colors.white,
+                    ),
                     onPressed: toggleListening,
                   ),
                 ),
@@ -350,7 +525,9 @@ class _ChatScreenState extends State<ChatScreen> {
                         borderSide: BorderSide.none,
                       ),
                       contentPadding: const EdgeInsets.symmetric(
-                          horizontal: 20, vertical: 14),
+                        horizontal: 20,
+                        vertical: 14,
+                      ),
                     ),
                   ),
                 ),
