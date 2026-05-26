@@ -31,6 +31,12 @@ class _ChatScreenState extends State<ChatScreen> {
   File? selectedImage;
   final ImagePicker _picker = ImagePicker();
   String userKey = "";
+  String userName = "";
+  String currentChatId = "";
+  List<Map<String, dynamic>> recentChats = [];
+  String selectedLanguageName = "";
+  String selectedLanguageCode = "";
+  String selectedTtsCode = "";
 
   final controller = TextEditingController();
   // ✅ REMOVED flutterTts — no longer needed
@@ -56,6 +62,12 @@ class _ChatScreenState extends State<ChatScreen> {
     super.initState();
     speech = stt.SpeechToText();
 
+    selectedLanguageName = widget.languageName;
+    selectedLanguageCode = widget.languageCode;
+    selectedTtsCode = widget.ttsCode;
+
+    loadName();
+    loadSavedLanguage();
     initUserKey();
   }
 
@@ -66,6 +78,26 @@ class _ChatScreenState extends State<ChatScreen> {
     speech.stop();
 
     super.dispose();
+  }
+
+  Future<void> clearCurrentChat() async {
+    currentChatId = const Uuid().v4();
+
+    SharedPreferences prefs = await SharedPreferences.getInstance();
+
+    await prefs.setString("current_chat", currentChatId);
+
+    setState(() {
+      messages.clear();
+    });
+  }
+
+  Future<void> loadName() async {
+    SharedPreferences prefs = await SharedPreferences.getInstance();
+
+    setState(() {
+      userName = prefs.getString("user_name") ?? "";
+    });
   }
 
   Future<void> initUserKey() async {
@@ -87,13 +119,72 @@ class _ChatScreenState extends State<ChatScreen> {
       userKey = deviceId;
     }
 
+    await createOrLoadChat();
+    await loadRecentChats();
+  }
+
+  Future<void> createOrLoadChat() async {
+    SharedPreferences prefs = await SharedPreferences.getInstance();
+
+    currentChatId = prefs.getString("current_chat") ?? const Uuid().v4();
+
+    await prefs.setString("current_chat", currentChatId);
+
     await loadChatHistory();
+  }
+
+  Future<void> loadRecentChats() async {
+    SharedPreferences prefs = await SharedPreferences.getInstance();
+
+    final saved = prefs.getString("recent_chats");
+
+    try {
+      if (saved != null && saved.isNotEmpty) {
+        final decoded = jsonDecode(saved);
+
+        if (decoded is List) {
+          setState(() {
+            recentChats = decoded
+                .map((e) => Map<String, dynamic>.from(e))
+                .toList();
+          });
+        } else {
+          recentChats = [];
+        }
+      } else {
+        recentChats = [];
+      }
+    } catch (e) {
+      recentChats = [];
+
+      await prefs.remove("recent_chats");
+    }
+  }
+
+  Future<void> saveRecentChats(String title) async {
+    SharedPreferences prefs = await SharedPreferences.getInstance();
+
+    bool exists = recentChats.any((e) => e["id"] == currentChatId);
+
+    if (!exists) {
+      recentChats.insert(0, {"id": currentChatId, "title": title});
+
+      await prefs.setString("recent_chats", jsonEncode(recentChats));
+    }
+  }
+
+  Future<void> loadSelectedChat(String chatId) async {
+    currentChatId = chatId;
+
+    await loadChatHistory();
+
+    Navigator.pop(context);
   }
 
   Future<void> saveChatHistory() async {
     SharedPreferences prefs = await SharedPreferences.getInstance();
 
-    String key = "chat_$userKey";
+    String key = "chat_${userKey}_$currentChatId";
 
     List<String> jsonList = messages.map((e) => jsonEncode(e)).toList();
 
@@ -103,21 +194,21 @@ class _ChatScreenState extends State<ChatScreen> {
   Future<void> loadChatHistory() async {
     SharedPreferences prefs = await SharedPreferences.getInstance();
 
-    String key = "chat_$userKey";
+    String key = "chat_${userKey}_$currentChatId";
 
     List<String>? saved = prefs.getStringList(key);
 
-    if (saved != null) {
-      setState(() {
-        messages.clear();
+    setState(() {
+      messages.clear();
 
+      if (saved != null) {
         messages.addAll(
           saved.map((e) => Map<String, String>.from(jsonDecode(e))),
         );
-      });
+      }
+    });
 
-      scrollToBottom();
-    }
+    scrollToBottom();
   }
 
   Future<void> toggleListening() async {
@@ -134,7 +225,7 @@ class _ChatScreenState extends State<ChatScreen> {
       if (available) {
         setState(() => isListening = true);
         await speech.listen(
-          localeId: widget.ttsCode,
+          localeId: selectedTtsCode,
           onResult: (result) {
             setState(() {
               controller.text = result.recognizedWords;
@@ -157,56 +248,6 @@ class _ChatScreenState extends State<ChatScreen> {
       setState(() => selectedImage = File(picked.path));
     }
   }
-
-  // Future<void> sendMessage() async {
-  //   final text = controller.text.trim();
-  //   if (text.isEmpty && selectedImage == null) return;
-
-  //   controller.clear();
-
-  //   setState(() {
-  //     if (text.isNotEmpty) messages.add({'from': 'user', 'text': text});
-  //     if (selectedImage != null) {
-  //       messages.add({'from': 'user', 'image': selectedImage!.path});
-  //     }
-  //     isTyping = true;
-  //   });
-
-  //   scrollToBottom();
-
-  //   final uri = Uri.parse('https://gaffis.net/pulse/public/api/chat');
-  //   final request = http.MultipartRequest('POST', uri);
-  //   request.fields['message'] = text;
-  //   request.fields['language'] = widget.languageCode;
-
-  //   if (selectedImage != null) {
-  //     request.files.add(
-  //       await http.MultipartFile.fromPath('image', selectedImage!.path),
-  //     );
-  //   }
-
-  //   final streamedResponse = await request.send();
-  //   final response = await http.Response.fromStream(streamedResponse);
-
-  //   if (response.statusCode != 200) {
-  //     setState(() => isTyping = false);
-  //     return;
-  //   }
-
-  //   final decoded = jsonDecode(response.body);
-  //   final reply = decoded['reply'] ?? 'No response';
-
-  //   setState(() {
-  //     isTyping = false;
-  //     selectedImage = null;
-  //     messages.add({'from': 'ai', 'text': reply});
-  //   });
-  //   await saveChatHistory();
-
-  //   scrollToBottom();
-  //   // ✅ No TTS here — chat screen is text only
-  //   // Voice calls handled by CallScreen via Vapi
-  // }
 
   Future<void> sendMessage() async {
     final text = controller.text.trim();
@@ -239,7 +280,7 @@ class _ChatScreenState extends State<ChatScreen> {
 
       request.fields['message'] = text;
 
-      request.fields['language'] = widget.languageCode;
+      request.fields['language'] = selectedLanguageCode;
 
       // send previous history also
       final recentHistory = messages.length > 20
@@ -282,9 +323,26 @@ class _ChatScreenState extends State<ChatScreen> {
 
         messages.add({'from': 'ai', 'text': 'Something went wrong'});
       });
-
-      await saveChatHistory();
     }
+
+    await saveChatHistory();
+    if (text.isNotEmpty) {
+      await saveRecentChats(text);
+    }
+  }
+
+  Future<void> loadSavedLanguage() async {
+    SharedPreferences prefs = await SharedPreferences.getInstance();
+
+    setState(() {
+      selectedLanguageCode =
+          prefs.getString("language_code") ?? widget.languageCode;
+
+      selectedLanguageName =
+          prefs.getString("language_name") ?? widget.languageName;
+
+      selectedTtsCode = prefs.getString("tts_code") ?? widget.ttsCode;
+    });
   }
 
   Widget chatBubble(Map<String, String> m) {
@@ -340,14 +398,178 @@ class _ChatScreenState extends State<ChatScreen> {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
+      drawer: Drawer(
+        child: Column(
+          children: [
+            Container(
+              width: double.infinity,
+              padding: const EdgeInsets.only(top: 60, left: 20, bottom: 20),
+              decoration: BoxDecoration(color: Colors.green.shade700),
+
+              child: Row(
+                children: [
+                  const CircleAvatar(
+                    radius: 28,
+                    backgroundColor: Colors.white,
+                    child: Icon(Icons.person, color: Colors.green, size: 30),
+                  ),
+
+                  const SizedBox(width: 15),
+
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(
+                          userName.isEmpty ? "Guest User" : userName,
+                          style: const TextStyle(
+                            color: Colors.white,
+                            fontSize: 18,
+                            fontWeight: FontWeight.bold,
+                          ),
+                        ),
+
+                        Text(
+                          selectedLanguageName,
+                          style: const TextStyle(color: Colors.white70),
+                        ),
+                      ],
+                    ),
+                  ),
+                ],
+              ),
+            ),
+
+            ListTile(
+              leading: const Icon(Icons.language),
+              title: const Text("Change Language"),
+
+              onTap: () {
+                showModalBottomSheet(
+                  context: context,
+                  builder: (_) {
+                    return ListView(
+                      shrinkWrap: true,
+                      children: [
+                        ListTile(
+                          title: const Text("English"),
+                          onTap: () async {
+                            SharedPreferences prefs =
+                                await SharedPreferences.getInstance();
+
+                            await prefs.setString("language_code", "en");
+                            await prefs.setString("language_name", "English");
+                            await prefs.setString("tts_code", "en-US");
+
+                            setState(() {
+                              selectedLanguageCode = "en";
+                              selectedLanguageName = "English";
+                              selectedTtsCode = "en-US";
+                            });
+
+                            Navigator.pop(context);
+                          },
+                        ),
+
+                        ListTile(
+                          title: const Text("Hindi"),
+                          onTap: () async {
+                            SharedPreferences prefs =
+                                await SharedPreferences.getInstance();
+
+                            await prefs.setString("language_code", "hi");
+                            await prefs.setString("language_name", "Hindi");
+                            await prefs.setString("tts_code", "hi-IN");
+
+                            setState(() {
+                              selectedLanguageCode = "hi";
+                              selectedLanguageName = "Hindi";
+                              selectedTtsCode = "hi-IN";
+                            });
+
+                            Navigator.pop(context);
+                          },
+                        ),
+
+                        ListTile(
+                          title: const Text("Marathi"),
+                          onTap: () async {
+                            SharedPreferences prefs =
+                                await SharedPreferences.getInstance();
+
+                            await prefs.setString("language_code", "mr");
+                            await prefs.setString("language_name", "Marathi");
+                            await prefs.setString("tts_code", "mr-IN");
+
+                            setState(() {
+                              selectedLanguageCode = "mr";
+                              selectedLanguageName = "Marathi";
+                              selectedTtsCode = "mr-IN";
+                            });
+
+                            Navigator.pop(context);
+                          },
+                        ),
+                      ],
+                    );
+                  },
+                );
+              },
+            ),
+
+            const Divider(),
+
+            ListTile(
+              leading: const Icon(Icons.add),
+              title: const Text("New Chat"),
+              onTap: () async {
+                Navigator.pop(context);
+
+                await clearCurrentChat();
+              },
+            ),
+
+            ListTile(
+              leading: const Icon(Icons.history),
+              title: const Text("Recent Chats"),
+            ),
+
+            Expanded(
+              child: ListView.builder(
+                itemCount: recentChats.length,
+
+                itemBuilder: (context, index) {
+                  final chat = recentChats[index];
+
+                  return ListTile(
+                    leading: const Icon(Icons.chat),
+
+                    title: Text(chat["title"]),
+
+                    onTap: () {
+                      loadSelectedChat(chat["id"]);
+                    },
+                  );
+                },
+              ),
+            ),
+          ],
+        ),
+      ),
       backgroundColor: Colors.white,
       appBar: AppBar(
         elevation: 0,
         backgroundColor: Colors.green.shade700,
-        leading: IconButton(
-          icon: const Icon(Icons.arrow_back, color: Colors.white),
-          onPressed: () => Navigator.pop(context),
+
+        leading: Builder(
+          builder: (context) => IconButton(
+            icon: const Icon(Icons.menu, color: Colors.white),
+            onPressed: () {
+              Scaffold.of(context).openDrawer();
+            },
+          ),
         ),
+
         actions: [
           IconButton(
             icon: const Icon(Icons.call, color: Colors.white),
@@ -357,35 +579,39 @@ class _ChatScreenState extends State<ChatScreen> {
                 MaterialPageRoute(
                   builder: (_) => CallScreen(
                     isVideo: false,
-                    languageCode: widget.languageCode,
-                    ttsCode: widget.ttsCode,
-                    languageName: widget.languageName,
+                    languageCode: selectedLanguageCode,
+                    ttsCode: selectedTtsCode,
+                    languageName: selectedLanguageName,
                   ),
                 ),
               );
             },
           ),
         ],
+
         title: Row(
           children: [
             const CircleAvatar(
               backgroundColor: Colors.white,
               child: Icon(Icons.agriculture, color: Colors.green),
             ),
+
             const SizedBox(width: 10),
+
             Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                const Text(
-                  'Gaffis Krushi AI',
-                  style: TextStyle(
+                Text(
+                  userName.isEmpty ? "Gaffis Krushi AI" : "Hi, $userName",
+                  style: const TextStyle(
                     fontSize: 18,
                     fontWeight: FontWeight.bold,
                     color: Colors.white,
                   ),
                 ),
+
                 Text(
-                  widget.languageName,
+                  selectedLanguageName,
                   style: const TextStyle(fontSize: 12, color: Colors.white70),
                 ),
               ],
