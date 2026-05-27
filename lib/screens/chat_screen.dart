@@ -6,7 +6,6 @@ import 'dart:io';
 import 'package:image_picker/image_picker.dart';
 import 'call_screen.dart';
 import 'package:shared_preferences/shared_preferences.dart';
-import 'package:device_info_plus/device_info_plus.dart';
 import 'package:uuid/uuid.dart';
 
 class ChatScreen extends StatefulWidget {
@@ -37,6 +36,7 @@ class _ChatScreenState extends State<ChatScreen> {
   String selectedLanguageName = "";
   String selectedLanguageCode = "";
   String selectedTtsCode = "";
+  bool showRecentChats = false;
 
   final controller = TextEditingController();
   // ✅ REMOVED flutterTts — no longer needed
@@ -78,6 +78,46 @@ class _ChatScreenState extends State<ChatScreen> {
     speech.stop();
 
     super.dispose();
+  }
+
+  Future<void> deleteChat(String chatId) async {
+    bool? confirm = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text("Delete Chat"),
+        content: const Text("Are you sure you want to delete this chat?"),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context, false),
+            child: const Text("Cancel"),
+          ),
+
+          ElevatedButton(
+            onPressed: () => Navigator.pop(context, true),
+            child: const Text("Delete"),
+          ),
+        ],
+      ),
+    );
+
+    if (confirm != true) return;
+
+    SharedPreferences prefs = await SharedPreferences.getInstance();
+
+    // remove chat messages
+    await prefs.remove("chat_${userKey}_$chatId");
+
+    // remove from recent list
+    recentChats.removeWhere((e) => e["id"] == chatId);
+
+    await prefs.setString("recent_chats", jsonEncode(recentChats));
+
+    // if current opened chat deleted
+    if (currentChatId == chatId) {
+      await clearCurrentChat();
+    }
+
+    setState(() {});
   }
 
   Future<void> clearCurrentChat() async {
@@ -529,29 +569,50 @@ class _ChatScreenState extends State<ChatScreen> {
               },
             ),
 
-            ListTile(
+            ExpansionTile(
               leading: const Icon(Icons.history),
               title: const Text("Recent Chats"),
-            ),
+              initiallyExpanded: showRecentChats,
 
-            Expanded(
-              child: ListView.builder(
-                itemCount: recentChats.length,
+              onExpansionChanged: (value) {
+                setState(() {
+                  showRecentChats = value;
+                });
+              },
 
-                itemBuilder: (context, index) {
-                  final chat = recentChats[index];
+              children: recentChats.isEmpty
+                  ? [
+                      const Padding(
+                        padding: EdgeInsets.all(12),
+                        child: Text(
+                          "No recent chats",
+                          style: TextStyle(color: Colors.grey),
+                        ),
+                      ),
+                    ]
+                  : recentChats.map((chat) {
+                      return ListTile(
+                        leading: const Icon(Icons.chat),
 
-                  return ListTile(
-                    leading: const Icon(Icons.chat),
+                        title: Text(
+                          chat["title"],
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                        ),
 
-                    title: Text(chat["title"]),
+                        onTap: () {
+                          loadSelectedChat(chat["id"]);
+                        },
 
-                    onTap: () {
-                      loadSelectedChat(chat["id"]);
-                    },
-                  );
-                },
-              ),
+                        trailing: IconButton(
+                          icon: const Icon(Icons.delete, color: Colors.red),
+
+                          onPressed: () {
+                            deleteChat(chat["id"]);
+                          },
+                        ),
+                      );
+                    }).toList(),
             ),
           ],
         ),
@@ -686,7 +747,7 @@ class _ChatScreenState extends State<ChatScreen> {
 
           // Input bar
           Padding(
-            padding: const EdgeInsets.fromLTRB(10, 10, 10, 40),
+            padding: const EdgeInsets.fromLTRB(10, 10, 10, 60),
             child: Row(
               children: [
                 const SizedBox(width: 6),
